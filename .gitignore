@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+challenges/*/ret2text
+challenges/*/ret2shellcode
+challenges/*/ret2syscall
+challenges/*/ret2libc1
+challenges/*/ret2libc2
+challenges/*/ret2libc3
+challenges/ret2libc3/libc.so.6
+core
+*.core
