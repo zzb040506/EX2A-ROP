@@ -7,6 +7,7 @@ challenges/*/ret2syscall
 challenges/*/ret2libc1
 challenges/*/ret2libc2
 challenges/*/ret2libc3
+challenges/*/ret2reg
 challenges/ret2libc3/libc.so.6
 core
 *.core

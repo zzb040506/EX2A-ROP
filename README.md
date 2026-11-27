@@ -1,6 +1,6 @@
 # 实验 2A：基于栈溢出的 ROP 利用
 
-本仓库是《软件安全》实验 2A 的源码与实验材料，包含从 **ret2text** 到 **ret2libc3** 的六个递进案例。所有靶程序都附带源码、编译规则和 pwntools 利用脚本，可以在任意 Linux 环境下一键复现；其中 ret2libc3 的两阶段泄漏作为中级 ROP 专题在实验报告中详细展开。
+本仓库是《软件安全》实验 2A 的源码与实验材料，包含从 **ret2text** 到 **ret2libc3** 的六个 basic ROP 案例，以及一个中级 ROP 专题 **ret2reg**。所有靶程序都附带源码、编译规则和 pwntools 利用脚本，可以在任意 Linux 环境下一键复现；ret2libc3 的两阶段泄漏与 ret2reg 的两种 gadget 变体在实验报告中详细展开。
 
 ## 实验内容
 
@@ -12,6 +12,7 @@
 | 4 | [ret2libc1](challenges/ret2libc1) | `system@plt("/bin/sh")` | 程序内有 `system` 与字符串 |
 | 5 | [ret2libc2](challenges/ret2libc2) | `gets` 写入 `/bin/sh` 后再 `system` | 有 `system@plt`，无字符串 |
 | 6 | [ret2libc3](challenges/ret2libc3) | 泄漏 `write@got` 计算 libc 基址 | 无 `system`、无字符串、开 ASLR |
+| 7 | [ret2reg](challenges/ret2reg) | 中级 ROP：`push esp;ret` / `call eax` 跳入栈上 shellcode | 静态链接 + 栈可执行，无需泄漏地址 |
 
 每个目录下有三类文件：
 
@@ -63,15 +64,15 @@ python3 exp.py --check    # 自动验证，输出 PASS/FAIL
 | `-fno-stack-protector` | 关闭 Canary，允许直接覆盖返回地址 |
 | `-no-pie` | 关闭地址随机化，代码段基址固定，便于引用符号 |
 | `-fno-builtin` | 避免编译器把 `gets` 等函数优化掉 |
-| `-static` | （仅 ret2syscall）把 libc 静态链入，保证 gadget 齐全 |
-| `-z execstack` | （仅 ret2shellcode）把栈标记为可执行 |
+| `-static` | （ret2syscall / ret2reg）把 libc 静态链入，保证 gadget 齐全 |
+| `-z execstack` | （ret2shellcode / ret2reg）把栈标记为可执行 |
 
 ## 目录结构
 
 ```
 .
 ├── challenges/
-│   ├── Makefile              # 六个靶程序的统一编译规则
+│   ├── Makefile              # 七个靶程序的统一编译规则
 │   ├── ret2text/
 │   │   ├── src.c
 │   │   └── exp.py
@@ -79,7 +80,8 @@ python3 exp.py --check    # 自动验证，输出 PASS/FAIL
 │   ├── ret2syscall/
 │   ├── ret2libc1/
 │   ├── ret2libc2/
-│   └── ret2libc3/
+│   ├── ret2libc3/
+│   └── ret2reg/              # 中级 ROP：寄存器间接跳转
 ├── docker/
 │   └── Dockerfile
 ├── docs/

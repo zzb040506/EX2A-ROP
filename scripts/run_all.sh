@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../challenges"
 
 FAILED=0
-for dir in ret2text ret2shellcode ret2syscall ret2libc1 ret2libc2 ret2libc3; do
+for dir in ret2text ret2shellcode ret2syscall ret2libc1 ret2libc2 ret2libc3 ret2reg; do
     echo "=================================================="
     ( cd "$dir" && python3 exp.py --check ) || FAILED=1
 done

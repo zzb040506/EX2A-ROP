@@ -15,7 +15,7 @@ cp -f "$LIBC" "$CH/ret2libc3/libc.so.6"
 echo "    $LIBC -> challenges/ret2libc3/libc.so.6"
 
 echo "[*] 检查保护机制"
-for bin in ret2text ret2shellcode ret2syscall ret2libc1 ret2libc2 ret2libc3; do
+for bin in ret2text ret2shellcode ret2syscall ret2libc1 ret2libc2 ret2libc3 ret2reg; do
     echo "--- $bin ---"
     file "$CH/$bin/$bin" | sed 's/^/    /'
 done

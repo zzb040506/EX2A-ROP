@@ -8,7 +8,7 @@ BASE    := -m32 -O0 -fno-stack-protector -fno-builtin -no-pie -mpreferred-stack-
 
 .PHONY: all clean
 all: ret2text/ret2text ret2shellcode/ret2shellcode ret2syscall/ret2syscall \
-     ret2libc1/ret2libc1 ret2libc2/ret2libc2 ret2libc3/ret2libc3
+     ret2libc1/ret2libc1 ret2libc2/ret2libc2 ret2libc3/ret2libc3 ret2reg/ret2reg
 
 # 1. 自带后门函数，NX 开启即可
 ret2text/ret2text: ret2text/src.c
@@ -32,5 +32,9 @@ ret2libc2/ret2libc2: ret2libc2/src.c
 ret2libc3/ret2libc3: ret2libc3/src.c
 	$(CC) $(BASE) -o $@ $<
 
+# 7. 中级 ROP（ret2reg）：静态链接提供 gadget，栈可执行以运行 shellcode
+ret2reg/ret2reg: ret2reg/src.c
+	$(CC) $(BASE) -static -z execstack -o $@ $<
+
 clean:
-	rm -f */ret2text */ret2shellcode */ret2syscall */ret2libc1 */ret2libc2 */ret2libc3
+	rm -f */ret2text */ret2shellcode */ret2syscall */ret2libc1 */ret2libc2 */ret2libc3 */ret2reg
